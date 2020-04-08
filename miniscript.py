@@ -1,11 +1,8 @@
-from enum import Enum, auto
 from io import StringIO
 from unittest import TestCase, skip
 
 from op import *
 from script import Script
-
-TYPE_ALPHABET = 'BVKWzonduefsmx'
 
 
 class MiniScript:
@@ -19,6 +16,7 @@ class MiniScript:
         if children:
             for child in children:
                 child.parent = self
+        self.type = None
 
     def __repr__(self):
         if self.modifiers:
@@ -417,124 +415,433 @@ class MiniScript:
                         [OP_ENDIF])
         return script
 
+    def validate(self):
+        # sanity check
+        if self.word in ('sha256', 'hash256'):
+            if len(bytes.fromhex(self.children[0].word)) != 32:
+                raise ValueError(
+                    f'Hash length should be 32 bytes {self.children[0].word}')
+        elif self.word in ('ripemd160', 'hash160'):
+            if len(bytes.fromhex(self.children[0].word)) != 20:
+                raise ValueError('Hash length should be 20 bytes')
+        elif self.word in ('older', 'after'):
+            k = int(self.children[0].word)
+            if k < 1 or k >= 0x80000000:
+                raise ValueError(
+                    f'Timelocks need a number between 1 and 0x80000000: {k}')
+        elif self.word in ('thresh', 'multi'):
+            k = int(self.children[0].word)
+            if k > len(self.children) - 1:
+                raise ValueError(
+                    f'{self.word} should have at least {k} subexpressions but has {len(self.children) - 1}'
+                )
+        elif self.word in ('and_v', 'and_b', 'and_n', 'or_b', 'or_c', 'or_d',
+                           'or_i'):
+            if len(self.children) != 2:
+                raise ValueError(
+                    f'{self.word} should have 2 subexpressions, not {len(self.children)}'
+                )
+        elif self.word == 'andor':
+            if len(self.children) != 3:
+                raise ValueError(
+                    f'andor should have 3 subexpressions, not {len(self.children)}'
+                )
+        elif self.word in ('pk', 'pk_k', 'pkh', 'pk_h'):
+            if len(self.children) != 1:
+                raise ValueError(f'{self.word} should have 1 subexpression')
+        else:
+            if len(self.children) != 0:
+                raise ValueError(f'{self.word} should have no subexpressions')
 
-class MiniScriptTest(TestCase):
-    maxDiff = None
+    def compute_type(self):
+        self.validate()
+        if self.word == 'pk_k':
+            self.type = ExpressionType('Konudemsx')
+            self.size = 34
+        elif self.word == 'pk_h':
+            self.type = ExpressionType('Knudemsx')
+            self.size = 24
+        elif self.word == 'pk':
+            self.type = ExpressionType('Bdemnosu')
+            self.size = 35
+        elif self.word == 'pkh':
+            self.type = ExpressionType('Bdemnsu')
+            self.size = 25
+        elif self.word in ('older', 'after'):
+            self.type = ExpressionType('Bzfmx')
+            script_num = encode_minimal_num(int(self.children[0].word))
+            self.size = len(Script([script_num]).raw_serialize()) + 1
+        elif self.word in ('sha256', 'hash256'):
+            self.type = ExpressionType('Bonudm')
+            self.size = 6 + 33
+        elif self.word in ('ripemd160', 'hash160'):
+            self.type = ExpressionType('Bonudm')
+            self.size = 6 + 21
+        elif self.word == 'just_1':
+            self.type = ExpressionType('Bzufmx')
+            self.size = 1
+        elif self.word == 'just_0':
+            self.type = ExpressionType('Bzudemsx')
+            self.size = 1
+        elif self.word == 'multi':
+            self.type = ExpressionType('Bnudems')
+            self.size = 3 + 34 * (len(self.children) - 1)
+        elif self.word == 'and_v':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            self.type = ExpressionType(
+                ('', 'B')['V' in x and 'B' in y]  # B=V_x*B_y
+                + ('', 'V')['V' in x and 'V' in y]  # V=V_x*V_y
+                + ('', 'K')['V' in x and 'K' in y]  # K=V_x*K_y
+                +
+                ('', 'n')['n' in x or ('z' in x and 'n' in y)]  # n=n_x+z_x*n_y
+                + ('', 'o')[('z' in x and 'o' in y) or
+                            ('o' in x and 'z' in y)]  # o=o_x*z_y+z_x*o_y
+                + ('', 'd')['d' in x and 'd' in y]  # d=d_x*d_y
+                + ('', 'm')['m' in x and 'm' in y]  # m=m_x*m_y
+                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
+                + ('', 's')['s' in x or 's' in y]  # s=s_x+s_y
+                + ('', 'f')['s' in x or 'f' in y]  # f=f_y+s_x
+                + ('', 'u')['u' in y]  # u=u_y
+                + ('', 'x')['x' in y]  # x=x_y
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size
+        elif self.word == 'and_b':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            self.type = ExpressionType(
+                'ux' + ('', 'B')['W' in y and 'B' in x]  # B=B_x*W_y
+                +
+                ('', 'n')['n' in x or ('z' in x and 'n' in y)]  # n=n_x+z_x*n_y
+                + ('', 'o')[('z' in x and 'o' in y) or
+                            ('o' in x and 'z' in y)]  # o=o_x*z_y+z_x*o_y
+                + ('', 'd')['d' in x and 'd' in y]  # d=d_x*d_y
+                + ('', 'm')['m' in x and 'm' in y]  # m=m_x*m_y
+                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
+                + ('', 's')['s' in x or 's' in y]  # s=s_x+s_y
+                + ('', 'e')['es' in x and 'es' in y]  # e=e_x*e_y*s_x*s_y
+                + ('', 'f')[('f' in x and 'f' in y) or 'fs' in x
+                            or 'fs' in y]  # f=f_x*f_y + f_x*s_x + f_y*s_y
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size + 1
+        elif self.word == 'and_n':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            self.type = ExpressionType(
+                'x' + ('', 'B')['Bdu' in x and 'B' in y]  # B=B_x*d_x*u_x*B_y
+                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
+                + ('', 'o')['o' in x and 'z' in y]  # o=o_x*z_y
+                + ('', 'u')['u' in y]  # u=u_y
+                + ('', 'd')['d' in x]  # d=d_x
+                + ('', 's')['s' in x or 's' in y]  # s=s_x+s_y
+                + ('',
+                   'e')['e' in x and ('s' in x or 's' in y)]  # e=e_x*(s_x+s_y)
+                + ('', 'm')['em' in x and 'm' in y]  # m=m_x*m_y*e_x
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size + 4
+        elif self.word == 'or_b':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            self.type = ExpressionType(
+                'dux' + ('', 'B')['Bd' in x and 'Wd' in y]  # B=B_x*d_x*W_x*d_y
+                + ('', 'o')[('z' in x and 'o' in y) or
+                            ('o' in x and 'z' in y)]  # o=o_x*z_y+z_x*o_y
+                + ('', 'm')['em' in x and 'em' in y and (
+                    's' in x or 's' in y)]  # m=m_x*m_y*e_x*e_y*(s_x+s_y)
+                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
+                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
+                + ('', 'e')['e' in x and 'e' in y]  # e=e_x*e_y
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size + 1
+        elif self.word == 'or_c':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            self.type = ExpressionType(
+                'fx' + ('', 'V')['Bud' in x and 'V' in y]  # V=V_y*B_x*u_x*d_x
+                + ('', 'o')['o' in x and 'z' in y]  # o=o_x*z_y
+                + ('', 'm')['me' in x and 'm' in y and
+                            ('s' in x or 's' in y)]  # m=m_x*m_y*e_x*(s_x+s_y)
+                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
+                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size + 2
+        elif self.word == 'or_d':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            self.type = ExpressionType(
+                'x' + ('', 'B')['Bdu' in x and 'B' in y]  # B=B_y*B_x*d_x*u_x
+                + ('', 'o')['o' in x and 'z' in y]  # o=o_x*z_y
+                + ('', 'm')['me' in x and 'm' in y and
+                            ('s' in x or 's' in y)]  # m=m_x*m_y*e_x*(s_x+s_y)
+                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
+                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
+                + ('', 'e')['e' in x and 'e' in y]  # e=e_x*e_y
+                + ('', 'u')['u' in y]  # u=u_y
+                + ('', 'd')['d' in y]  # d=d_y
+                + ('', 'f')['f' in y]  # f=f_y
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size + 3
+        elif self.word == 'or_i':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            self.type = ExpressionType(
+                'x' + ('', 'V')['V' in x and 'V' in y]  # V=V_x*V_y
+                + ('', 'B')['B' in x and 'B' in y]  # B=B_x*B_y
+                + ('', 'K')['K' in x and 'K' in y]  # K=K_x*K_y
+                + ('', 'u')['u' in x and 'u' in y]  # u=u_x*u_y
+                + ('', 'f')['f' in x and 'f' in y]  # f=f_x*f_y
+                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
+                + ('', 'o')['z' in x and 'z' in y]  # o=z_x*z_y
+                + ('', 'e')[('e' in x and 'f' in y) or
+                            ('f' in x and 'e' in y)]  # e=e_x*f_y+f_x*e_y
+                + ('', 'm')['m' in x and 'm' in y and
+                            ('s' in x or 's' in y)]  # m=m_x*m_y*(s_x+s_y)
+                + ('', 'd')['d' in x or 'd' in y]  # d=d_x+d_y
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size + 3
+        elif self.word == 'andor':
+            x = self.children[0].compute_type()
+            y = self.children[1].compute_type()
+            z = self.children[2].compute_type()
+            self.type = ExpressionType(
+                'x' + ('', 'B')['Bdu' in x and 'B' in y
+                                and 'B' in z]  # B=B_x*d_x*u_x*B_y*B_z
+                + ('', 'K')['Bdu' in x and 'K' in y
+                            and 'K' in z]  # K=B_x*d_x*u_x*K_y*K_z
+                + ('', 'V')['Bdu' in x and 'V' in y
+                            and 'V' in z]  # V=B_x*d_x*u_x*V_y*V_z
+                +
+                ('', 'z')['z' in x and 'z' in y and 'z' in z]  # z=z_x*z_y*z_z
+                + ('', 'o')[('z' in x and 'o' in y and 'o' in z) or
+                            ('o' in x and 'z' in y and 'z' in z
+                             )]  # o=o_x*z_y*z_z+z_x*o_y*o_z
+                + ('', 'u')['u' in y and 'u' in z]  # u=u_y*u_z
+                + ('',
+                   'f')[('s' in x or 'f' in y) and 'f' in z]  # f=(s_x+f_y)*f_z
+                + ('', 'd')['d' in z]  # d=d_z
+                + ('', 'e')[('s' in x or 'f' in y) and 'e' in x
+                            and 'e' in z]  # e=e_x*e_z*(s_x+s_y)
+                + ('', 'm')['em' in x and 'm' in y and 'm' in z and
+                            ('s' in x or 's' in y or 's' in z
+                             )]  # m=m_x*m_y*m_z*e_x*(s_x+s_y+s_z)
+                + ('',
+                   's')['s' in z and ('s' in x or 's' in y)]  # s=s_z*(s_x+s_y)
+            )
+            self.size = self.children[0].size + \
+                self.children[1].size + \
+                self.children[2].size + 3
+        elif self.word == 'thresh':
+            all_e, all_m, num_s, args = True, True, 0, 0
+            k = int(self.children[0].word)
+            for i, child in enumerate(self.children[1:]):
+                t = child.compute_type()
+                if i == 0 and 'Bdu' not in t:
+                    raise ValueError(
+                        'First expression in thresh should be Bdu')
+                elif i > 0 and 'Wdu' not in t:
+                    raise ValueError(
+                        f'non-first expression in thresh should be Wdu {t} {child}'
+                    )
+                if 'e' not in t:
+                    all_e = False
+                if 'm' not in t:
+                    all_m = False
+                if 's' in t:
+                    num_s += 1
+                if 'o' in t:
+                    args += 1
+                elif 'z' not in t:
+                    args += 2
+            self.type = ExpressionType(
+                'Bdu' + ('', 'z')[args == 0]  # all z's to get z
+                + ('', 'o')[args == 1]  # one o, all z's to get o
+                + ('', 'e')[all_e and num_s == len(self.children) -
+                            1]  # all s's and all e's
+                + ('', 'm')[all_e and all_m and num_s >= len(self.children) -
+                            1 - k]  # all e's and all e's
+                + ('', 's')[num_s >= len(self.children) - k])
+            self.size = len(encode_minimal_num(int(self.children[0].word)))
+            for child in self.children[1:]:
+                self.size += child.size + 1
+        else:
+            raise SyntaxError(f'bad word {self.word}')
+        assert self.type, f'{self.word} has no type'
+        # take care of modifiers
+        for m in reversed(self.modifiers):
+            if m == 'a':
+                self.type = ExpressionType('x' +
+                                           ('', 'W')['B' in self.type]  # W=B_x
+                                           +
+                                           ('', 'u')['u' in self.type]  # u=u_x
+                                           +
+                                           ('', 'd')['d' in self.type]  # d=d_x
+                                           +
+                                           ('', 'f')['f' in self.type]  # f=f_x
+                                           +
+                                           ('', 'e')['e' in self.type]  # e=e_x
+                                           +
+                                           ('', 'm')['m' in self.type]  # m=m_x
+                                           +
+                                           ('', 's')['s' in self.type]  # s=s_x
+                                           )
+                self.size += 2
+            elif m == 's':
+                self.type = ExpressionType(
+                    ('', 'W')['Bo' in self.type]  # W=B_x*o_x
+                    + ('', 'u')['u' in self.type]  # u=u_x
+                    + ('', 'd')['d' in self.type]  # d=d_x
+                    + ('', 'f')['f' in self.type]  # f=f_x
+                    + ('', 'e')['e' in self.type]  # e=e_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + ('', 's')['s' in self.type]  # s=s_x
+                    + ('', 'x')['x' in self.type]  # x=x_x
+                )
+                self.size += 1
+            elif m == 'c':
+                self.type = ExpressionType(
+                    # (a, b)[expr] will eval to a if false b if true
+                    'us' + ('', 'B')['K' in self.type]  # B=K_x
+                    + ('', 'o')['o' in self.type]  # o=o_x
+                    + ('', 'n')['n' in self.type]  # n=n_x
+                    + ('', 'd')['d' in self.type]  # d=d_x
+                    + ('', 'f')['f' in self.type]  # f=f_x
+                    + ('', 'e')['e' in self.type]  # e=e_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + 'us')
+                self.size += 1
+            elif m == 'd':
+                self.type = ExpressionType(
+                    'nudx' + ('', 'B')['Vz' in self.type]  # B=V_x*z_x
+                    + ('', 'o')['z' in self.type]  # o=z_x
+                    + ('', 'e')['f' in self.type]  # e=f_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + ('', 's')['s' in self.type]  # s=s_x
+                )
+                self.size += 3
+            elif m == 'v':
+                if 'x' in self.type:
+                    self.size += 1
+                self.type = ExpressionType(
+                    # (a, b)[expr] will eval to a if false b if true
+                    'fx' + ('', 'V')['B' in self.type]  # V=B_x
+                    + ('', 'z')['z' in self.type]  # z=z_x
+                    + ('', 'o')['o' in self.type]  # o=o_x
+                    + ('', 'n')['n' in self.type]  # n=n_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + ('', 's')['s' in self.type]  # s=s_x
+                )
+            elif m == 'j':
+                self.type = ExpressionType(
+                    'ndx' + ('', 'B')['Bn' in self.type]  # B=B_x*n_x
+                    + ('', 'e')['f' in self.type]  # e=f_x
+                    + ('', 'o')['o' in self.type]  # o=o_x
+                    + ('', 'u')['u' in self.type]  # u=u_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + ('', 's')['s' in self.type]  # s=s_x
+                )
+                self.size += 4
+            elif m == 'n':
+                self.type = ExpressionType(
+                    'ux' + ('', 'B')['B' in self.type]  # B=B_x
+                    + ('', 'z')['z' in self.type]  # z=z_x
+                    + ('', 'o')['o' in self.type]  # o=o_x
+                    + ('', 'n')['n' in self.type]  # n=n_x
+                    + ('', 'd')['d' in self.type]  # d=d_x
+                    + ('', 'f')['f' in self.type]  # f=f_x
+                    + ('', 'e')['e' in self.type]  # e=e_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + ('', 's')['s' in self.type]  # s=s_x
+                )
+                self.size += 1
+            elif m in ('l', 'u'):
+                self.type = ExpressionType(
+                    # (a, b)[expr] will eval to a if false b if true
+                    'dx' + ('', 'B')['B' in self.type]  # B=B_x
+                    + ('', 'u')['u' in self.type]  # u=u_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + ('', 's')['s' in self.type]  # s=s_x
+                    + ('', 'o')['z' in self.type]  # o=z_x
+                    + ('', 'e')['f' in self.type]  # e=f_x
+                )
+                self.size += 4
+            elif m == 't':
+                self.type = ExpressionType(
+                    # (a, b)[expr] will eval to a if false b if true
+                    'fux' + ('', 'B')['V' in self.type]  # B=V_x
+                    + ('', 'z')['z' in self.type]  # z=z_x
+                    + ('', 'o')['o' in self.type]  # o=o_x
+                    + ('', 'd')['d' in self.type]  # d=d_x
+                    + ('', 'm')['m' in self.type]  # m=m_x
+                    + ('', 's')['s' in self.type]  # s=s_x
+                )
+                self.size += 1
+        return self.type
 
-    def test_vectors(self):
-        tests = (
-            ('lltvln:after(1231488000)',
-             '6300676300676300670400046749b1926869516868'),
-            ('uuj:and_v(v:multi(2,03d01115d548e7561b15c38f004d734633687cf4419620095bc5b0f47070afe85a,025601570cb47f238d2b0286db4a990fa0f3ba28d1a319f5e7cf55c2a2444da7cc),after(1231488000))',
-             '6363829263522103d01115d548e7561b15c38f004d734633687cf4419620095bc5b0f47070afe85a21025601570cb47f238d2b0286db4a990fa0f3ba28d1a319f5e7cf55c2a2444da7cc52af0400046749b168670068670068'
-             ),
-            ('or_b(un:multi(2,03daed4f2be3a8bf278e70132fb0beb7522f570e144bf615c07e996d443dee8729,024ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c97),al:older(16))',
-             '63522103daed4f2be3a8bf278e70132fb0beb7522f570e144bf615c07e996d443dee872921024ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c9752ae926700686b63006760b2686c9b'
-             ),
-            (
-                'j:and_v(vdv:after(1567547623),older(2016))',
-                '829263766304e7e06e5db169686902e007b268',
-            ),
-            ('and_v(vu:hash256(131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b),tv:sha256(ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc5))',
-             '6382012088aa20131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b876700686982012088a820ec4916dd28fc4c10d78e287ca5d9cc51ee1ae73cbfde08c6b37324cbfaac8bc58851'
-             ),
-            ('t:andor(multi(3,02d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e,03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556,02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13),v:older(4194305),v:sha256(9267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed2))',
-             '532102d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e2103fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a14602975562102e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd1353ae6482012088a8209267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed2886703010040b2696851'
-             ),
-            ('or_d(multi(1,02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9),or_b(multi(3,022f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01,032fa2104d6b38d11b0230010559879124e42ab8dfeff5ff29dc9cdadd4ecacc3f,03d01115d548e7561b15c38f004d734633687cf4419620095bc5b0f47070afe85a),su:after(500000)))',
-             '512102f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f951ae73645321022f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a0121032fa2104d6b38d11b0230010559879124e42ab8dfeff5ff29dc9cdadd4ecacc3f2103d01115d548e7561b15c38f004d734633687cf4419620095bc5b0f47070afe85a53ae7c630320a107b16700689b68'
-             ),
-            ('or_d(sha256(38df1c1f64a24a77b23393bca50dff872e31edc4f3b5aa3b90ad0b82f4f089b6),and_n(un:after(499999999),older(4194305)))',
-             '82012088a82038df1c1f64a24a77b23393bca50dff872e31edc4f3b5aa3b90ad0b82f4f089b68773646304ff64cd1db19267006864006703010040b26868'
-             ),
-            ('and_v(or_i(v:multi(2,02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5,03774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb),v:multi(2,03e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a,025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc)),sha256(d1ec675902ef1633427ca360b290b0b3045a0d9058ddb5e648b4c3c3224c5c68))',
-             '63522102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee52103774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb52af67522103e60fce93b59e9ec53011aabc21c23e97b2a31369b87a5ae9c44ee89e2a6dec0a21025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc52af6882012088a820d1ec675902ef1633427ca360b290b0b3045a0d9058ddb5e648b4c3c3224c5c6887'
-             ),
-            ('j:and_b(multi(2,0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798,024ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c97),s:or_i(older(1),older(4252898)))',
-             '82926352210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f8179821024ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c9752ae7c6351b26703e2e440b2689a68'
-             ),
-            ('and_b(older(16),s:or_d(sha256(e38990d0c7fc009880a9c07c23842e886c6bbdc964ce6bdd5817ad357335ee6f),n:after(1567547623)))',
-             '60b27c82012088a820e38990d0c7fc009880a9c07c23842e886c6bbdc964ce6bdd5817ad357335ee6f87736404e7e06e5db192689a'
-             ),
-            ('j:and_v(v:hash160(20195b5a3d650c17f0f29f91c33f8f6335193d07),or_d(sha256(96de8fc8c256fa1e1556d41af431cace7dca68707c78dd88c3acab8b17164c47),older(16)))',
-             '82926382012088a91420195b5a3d650c17f0f29f91c33f8f6335193d078882012088a82096de8fc8c256fa1e1556d41af431cace7dca68707c78dd88c3acab8b17164c4787736460b26868'
-             ),
-            ('and_b(hash256(32ba476771d01e37807990ead8719f08af494723de1d228f2c2c07cc0aa40bac),a:and_b(hash256(131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b),a:older(1)))',
-             '82012088aa2032ba476771d01e37807990ead8719f08af494723de1d228f2c2c07cc0aa40bac876b82012088aa20131772552c01444cd81360818376a040b7c3b2b7b0a53550ee3edde216cec61b876b51b26c9a6c9a'
-             ),
-            ('thresh(2,multi(2,03a0434d9e47f3c86235477c7b1ae6ae5d3442d49b1943c2b752a68e2a47e247c7,036d2b085e9e382ed10b69fc311a03f8641ccfff21574de0927513a49d9a688a00),a:multi(1,036d2b085e9e382ed10b69fc311a03f8641ccfff21574de0927513a49d9a688a00),a:pk(022f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01))',
-             '522103a0434d9e47f3c86235477c7b1ae6ae5d3442d49b1943c2b752a68e2a47e247c721036d2b085e9e382ed10b69fc311a03f8641ccfff21574de0927513a49d9a688a0052ae6b5121036d2b085e9e382ed10b69fc311a03f8641ccfff21574de0927513a49d9a688a0051ae6c936b21022f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01ac6c935287'
-             ),
-            ('and_n(sha256(d1ec675902ef1633427ca360b290b0b3045a0d9058ddb5e648b4c3c3224c5c68),t:or_i(v:older(4252898),v:older(144)))',
-             '82012088a820d1ec675902ef1633427ca360b290b0b3045a0d9058ddb5e648b4c3c3224c5c68876400676303e2e440b26967029000b269685168'
-             ),
-            ('or_d(d:and_v(v:older(4252898),v:older(4252898)),sha256(38df1c1f64a24a77b23393bca50dff872e31edc4f3b5aa3b90ad0b82f4f089b6))',
-             '766303e2e440b26903e2e440b26968736482012088a82038df1c1f64a24a77b23393bca50dff872e31edc4f3b5aa3b90ad0b82f4f089b68768'
-             ),
-            ('and_v(or_c(sha256(9267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed2),v:multi(1,02c44d12c7065d812e8acf28d7cbb19f9011ecd9e9fdf281b0e6a3b5e87d22e7db)),pk(03acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe))',
-             '82012088a8209267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed28764512102c44d12c7065d812e8acf28d7cbb19f9011ecd9e9fdf281b0e6a3b5e87d22e7db51af682103acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbeac'
-             ),
-            ('and_v(or_c(multi(2,036d2b085e9e382ed10b69fc311a03f8641ccfff21574de0927513a49d9a688a00,02352bbf4a4cdd12564f93fa332ce333301d9ad40271f8107181340aef25be59d5),v:ripemd160(1b0f3c404d12075c68c938f9f60ebea4f74941a0)),pk(03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556))',
-             '5221036d2b085e9e382ed10b69fc311a03f8641ccfff21574de0927513a49d9a688a002102352bbf4a4cdd12564f93fa332ce333301d9ad40271f8107181340aef25be59d552ae6482012088a6141b0f3c404d12075c68c938f9f60ebea4f74941a088682103fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556ac'
-             ),
-            ('and_v(andor(hash256(8a35d9ca92a48eaade6f53a64985e9e2afeb74dcf8acb4c3721e0dc7e4294b25),v:hash256(939894f70e6c3a25da75da0cc2071b4076d9b006563cf635986ada2e93c0d735),v:older(50000)),after(499999999))',
-             '82012088aa208a35d9ca92a48eaade6f53a64985e9e2afeb74dcf8acb4c3721e0dc7e4294b2587640350c300b2696782012088aa20939894f70e6c3a25da75da0cc2071b4076d9b006563cf635986ada2e93c0d735886804ff64cd1db1'
-             ),
-            ('andor(hash256(5f8d30e655a7ba0d7596bb3ddfb1d2d20390d23b1845000e1e118b3be1b3f040),j:and_v(v:hash160(3a2bff0da9d96868e66abc4427bea4691cf61ccd),older(4194305)),ripemd160(44d90e2d3714c8663b632fcf0f9d5f22192cc4c8))',
-             '82012088aa205f8d30e655a7ba0d7596bb3ddfb1d2d20390d23b1845000e1e118b3be1b3f040876482012088a61444d90e2d3714c8663b632fcf0f9d5f22192cc4c8876782926382012088a9143a2bff0da9d96868e66abc4427bea4691cf61ccd8803010040b26868'
-             ),
-            ('or_i(and_v(v:after(500000),pk(02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5)),sha256(d9147961436944f43cd99d28b2bbddbf452ef872b30c8279e255e7daafc7f946))',
-             '630320a107b1692102c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ac6782012088a820d9147961436944f43cd99d28b2bbddbf452ef872b30c8279e255e7daafc7f9468768'
-             ),
-            ('thresh(2,pkh(5dedfbf9ea599dd4e3ca6a80b333c472fd0b3f69),s:sha256(e38990d0c7fc009880a9c07c23842e886c6bbdc964ce6bdd5817ad357335ee6f),a:hash160(dd69735817e0e3f6f826a9238dc2e291184f0131))',
-             '76a9145dedfbf9ea599dd4e3ca6a80b333c472fd0b3f6988ac7c82012088a820e38990d0c7fc009880a9c07c23842e886c6bbdc964ce6bdd5817ad357335ee6f87936b82012088a914dd69735817e0e3f6f826a9238dc2e291184f0131876c935287'
-             ),
-            ('and_n(sha256(9267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed2),u:and_v(v:older(144),pk(03fe72c435413d33d48ac09c9161ba8b09683215439d62b7940502bda8b202e6ce)))',
-             '82012088a8209267d3dbed802941483f1afa2a6bc68de5f653128aca9bf1461c5d0a3ad36ed28764006763029000b2692103fe72c435413d33d48ac09c9161ba8b09683215439d62b7940502bda8b202e6ceac67006868'
-             ),
-            ('and_n(pk(03daed4f2be3a8bf278e70132fb0beb7522f570e144bf615c07e996d443dee8729),and_b(l:older(4252898),a:older(16)))',
-             '2103daed4f2be3a8bf278e70132fb0beb7522f570e144bf615c07e996d443dee8729ac64006763006703e2e440b2686b60b26c9a68'
-             ),
-            ('c:or_i(and_v(v:older(16),pk_h(9fc5dbe5efdce10374a4dd4053c93af540211718)),pk_h(2fbd32c8dd59ee7c17e66cb6ebea7e9846c3040f))',
-             '6360b26976a9149fc5dbe5efdce10374a4dd4053c93af540211718886776a9142fbd32c8dd59ee7c17e66cb6ebea7e9846c3040f8868ac'
-             ),
-            ('or_d(pkh(c42e7ef92fdb603af844d064faad95db9bcdfd3d),andor(pk(024ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c97),older(2016),after(1567547623)))',
-             '76a914c42e7ef92fdb603af844d064faad95db9bcdfd3d88ac736421024ce119c96e2fa357200b559b2f7dd5a5f02d5290aff74b03f3e471b273211c97ac6404e7e06e5db16702e007b26868'
-             ),
-            ('c:andor(ripemd160(6ad07d21fd5dfc646f0b30577045ce201616b9ba),pk_h(9fc5dbe5efdce10374a4dd4053c93af540211718),and_v(v:hash256(8a35d9ca92a48eaade6f53a64985e9e2afeb74dcf8acb4c3721e0dc7e4294b25),pk_h(dd100be7d9aea5721158ebde6d6a1fd8fff93bb1)))',
-             '82012088a6146ad07d21fd5dfc646f0b30577045ce201616b9ba876482012088aa208a35d9ca92a48eaade6f53a64985e9e2afeb74dcf8acb4c3721e0dc7e4294b258876a914dd100be7d9aea5721158ebde6d6a1fd8fff93bb1886776a9149fc5dbe5efdce10374a4dd4053c93af5402117188868ac'
-             ),
-            ('c:andor(u:ripemd160(6ad07d21fd5dfc646f0b30577045ce201616b9ba),pk_h(20d637c1a6404d2227f3561fdbaff5a680dba648),or_i(pk_h(9652d86bedf43ad264362e6e6eba6eb764508127),pk_h(751e76e8199196d454941c45d1b3a323f1433bd6)))',
-             '6382012088a6146ad07d21fd5dfc646f0b30577045ce201616b9ba87670068646376a9149652d86bedf43ad264362e6e6eba6eb764508127886776a914751e76e8199196d454941c45d1b3a323f1433bd688686776a91420d637c1a6404d2227f3561fdbaff5a680dba6488868ac'
-             ),
-            ('c:or_i(andor(pkh(fcd35ddacad9f2d5be5e464639441c6065e6955d),pk_h(9652d86bedf43ad264362e6e6eba6eb764508127),pk_h(06afd46bcdfd22ef94ac122aa11f241244a37ecc)),pk_k(02d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e))',
-             '6376a914fcd35ddacad9f2d5be5e464639441c6065e6955d88ac6476a91406afd46bcdfd22ef94ac122aa11f241244a37ecc886776a9149652d86bedf43ad264362e6e6eba6eb7645081278868672102d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e68ac'
-             ),
-        )
-        for miniscript, script_hex in tests:
-            k = MiniScript.parse(StringIO(miniscript))
-            self.assertEqual(k.__repr__(), miniscript)
-            s = k.script()
-            self.assertEqual(s.raw_serialize().hex(), script_hex, s)
-            self.assertEqual(s.miniscript().__repr__(), k.__repr__())
+
+EXPRESSION_TYPE_ALPHABET = 'BVKWzonduefsmx'
 
 
 class ExpressionType(int):
     def __new__(cls, s):
         result = 0
         for letter in s:
-            if letter not in TYPE_ALPHABET:
-                raise SyntaxError('Not a valid type')
-            result |= (1 << TYPE_ALPHABET.index(letter))
-        return super().__new__(cls, result)
+            if letter not in EXPRESSION_TYPE_ALPHABET:
+                raise KeyError('Not a valid type')
+            result |= (1 << EXPRESSION_TYPE_ALPHABET.index(letter))
+        e = super().__new__(cls, result)
+        if 'z' in e and 'o' in e:
+            raise TypeError('Cannot consume both 1 and 0 arguments')
+        if 'n' in e and 'z' in e:
+            raise TypeError(
+                'Cannot consume both 0 elements and 1 or more elements')
+        if 'V' in e and 'd' in e:
+            raise TypeError(
+                'Verifying expressions halt and are not dissatisfiable')
+        if 'K' in e and 'u' not in e:
+            raise TypeError('Key expressions are also unit expressions')
+        if 'V' in e and 'u' in e:
+            raise TypeError(
+                'Verifying expressions do not push anything back so are not unit expressions'
+            )
+        if 'e' in e and 'f' in e:
+            raise TypeError(
+                'Dissatisfactions cannot both be non-malleable and also have at least one signature'
+            )
+        if 'e' in e and 'd' not in e:
+            raise TypeError(
+                'Non-malleable Dissatisfactions imply dissatisfiability')
+        if 'V' in e and 'e' in e:
+            raise TypeError('Verifying expressions are not dissatisfiable')
+        if 'd' in e and 'f' in e:
+            raise TypeError('Dissatisfiability implies no signature is needed')
+        if 'V' in e and 'f' not in e:
+            raise TypeError(
+                'Verifying expressions have no dissatisfactions, meaning it is forced'
+            )
+        if 'K' in e and 's' not in e:
+            raise TypeError('Key expressions always require a signature')
+        if 'z' in e and 'm' not in e:
+            raise TypeError(
+                'Zero arguments being consumed imply non-malleability')
+        return e
 
     def __repr__(self):
         result = ''
-        for i, letter in enumerate(TYPE_ALPHABET):
+        for i, letter in enumerate(EXPRESSION_TYPE_ALPHABET):
             if self & (1 << i):
                 result += letter
         return result
 
-    def __in__(self, letter):
-        index = TYPE_ALPHABET.index(letter)
-        return bool(self & (1 << index))
+    def __contains__(self, letters):
+        result = True
+        for letter in letters:
+            index = EXPRESSION_TYPE_ALPHABET.index(letter)
+            result = result and bool(self & (1 << index))
+        return result
