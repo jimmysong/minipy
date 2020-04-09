@@ -1,6 +1,7 @@
 from io import StringIO
 from unittest import TestCase, skip
 
+from expression import ExpressionType
 from op import *
 from script import Script
 
@@ -44,10 +45,10 @@ class MiniScript:
                 items.pop(0)
             n = len(node.children) - 1
             if number_to_op_code(n) != items[0]:
-                raise RuntimeError(f'not the expected pattern')
+                raise SyntaxError(f'not the expected pattern')
             items.pop(0)
             if items[0] not in (OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY):
-                raise RuntimeError(f'not the expected pattern')
+                raise SyntaxError(f'not the expected pattern')
             if items[0] == OP_CHECKMULTISIGVERIFY:
                 node.modifiers = 'v'
             items.pop(0)
@@ -121,11 +122,11 @@ class MiniScript:
             items.pop(0)
             child_1 = cls.from_script(items)
             if items[0] != OP_ELSE:
-                raise RuntimeError('not the expected pattern')
+                raise SyntaxError('not the expected pattern')
             items.pop(0)
             child_2 = cls.from_script(items)
             if items[0] != OP_ENDIF:
-                raise RuntimeError(f'not the expected pattern {items}')
+                raise SyntaxError(f'not the expected pattern {items}')
             items.pop(0)
             if child_1.word == 'just_0':
                 node = child_2
@@ -139,7 +140,7 @@ class MiniScript:
             items.pop(0)
             node = cls.from_script(items, parent)
             if items[0] != OP_FROMALTSTACK:
-                raise RuntimeError('not the expected pattern')
+                raise SyntaxError('not the expected pattern')
             items.pop(0)
             node.modifiers = 'a' + node.modifiers
         elif items[0] == OP_SWAP:
@@ -151,7 +152,7 @@ class MiniScript:
             items.pop(0)
             node = cls.from_script(items, parent)
             if items[0] != OP_ENDIF:
-                raise RuntimeError('not the expected pattern')
+                raise SyntaxError('not the expected pattern')
             items.pop(0)
             node.modifiers = 'd' + node.modifiers
         elif len(items) > 3 and items[0] == OP_SIZE and \
@@ -160,11 +161,11 @@ class MiniScript:
                 items.pop(0)
             node = cls.from_script(items, parent)
             if items[0] != OP_ENDIF:
-                raise RuntimeError('not the expected pattern')
+                raise SyntaxError('not the expected pattern')
             items.pop(0)
             node.modifiers = 'j' + node.modifiers
         else:
-            raise RuntimeError(f'script is not a miniscript {items}')
+            raise SyntaxError(f'script is not a miniscript {items}')
         while len(items) < last_length:
             if not items:
                 return node
@@ -189,7 +190,7 @@ class MiniScript:
                     items.pop(0)
                     child_2 = cls.from_script(items)
                     if items[0] != OP_ENDIF:
-                        raise RuntimeError('not the expected pattern')
+                        raise SyntaxError('not the expected pattern')
                     items.pop(0)
                     if child.word == 'just_0':
                         node = cls('and_n', parent, None, [node, child_2])
@@ -201,14 +202,14 @@ class MiniScript:
                     # or_c
                     node = cls('or_c', parent, None, [node, child])
                 else:
-                    raise RuntimeError('not the expected pattern')
+                    raise SyntaxError('not the expected pattern')
             elif len(items) > 1 and items[0] == OP_IFDUP \
                  and items[1] == OP_NOTIF:
                 items.pop(0)
                 items.pop(0)
                 child = cls.from_script(items)
                 if items[0] != OP_ENDIF:
-                    raise RuntimeError('not the expected pattern')
+                    raise SyntaxError('not the expected pattern')
                 items.pop(0)
                 node = cls('or_d', parent, None, [node, child])
             elif items[0] == OP_1:
@@ -219,7 +220,7 @@ class MiniScript:
                 try:
                     items_copy = Script(items[:])
                     node2 = cls.from_script(items_copy)
-                except RuntimeError as e:
+                except SyntaxError as e:
                     continue
                 if items_copy and items_copy[0] == OP_BOOLOR:
                     # or_b
@@ -242,7 +243,7 @@ class MiniScript:
                             break
                         cls.from_script(items, node)
                         if items[0] != OP_ADD:
-                            raise RuntimeError('not the expected pattern')
+                            raise SyntaxError('not the expected pattern')
                         items.pop(0)
                     k = op_code_to_number(items.pop(0))
                     first_child = cls(str(k), node, None)
@@ -378,7 +379,7 @@ class MiniScript:
             script = result + Script(
                 [encode_minimal_num(int(self.children[0].word)), OP_EQUAL])
         else:
-            raise RuntimeError(f'unknown word: {self.word}')
+            raise SyntaxError(f'unknown word: {self.word}')
         if self.modifiers:
             for c in reversed(self.modifiers):
                 if c == 'a':
@@ -490,20 +491,19 @@ class MiniScript:
             x = self.children[0].compute_type()
             y = self.children[1].compute_type()
             self.type = ExpressionType(
-                ('', 'B')['V' in x and 'B' in y]  # B=V_x*B_y
-                + ('', 'V')['V' in x and 'V' in y]  # V=V_x*V_y
-                + ('', 'K')['V' in x and 'K' in y]  # K=V_x*K_y
-                +
-                ('', 'n')['n' in x or ('z' in x and 'n' in y)]  # n=n_x+z_x*n_y
-                + ('', 'o')[('z' in x and 'o' in y) or
-                            ('o' in x and 'z' in y)]  # o=o_x*z_y+z_x*o_y
-                + ('', 'd')['d' in x and 'd' in y]  # d=d_x*d_y
-                + ('', 'm')['m' in x and 'm' in y]  # m=m_x*m_y
-                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
-                + ('', 's')['s' in x or 's' in y]  # s=s_x+s_y
-                + ('', 'f')['s' in x or 'f' in y]  # f=f_y+s_x
-                + ('', 'u')['u' in y]  # u=u_y
-                + ('', 'x')['x' in y]  # x=x_y
+                # <x> <y>
+                (x.V * y.B).B  # B=V_x*B_y
+                + (x.V * y.V).V  # V=V_x*V_y
+                + (x.V * y.K).K  # K=V_x*K_y
+                + (x.n + (x.z * y.n)).n  # n=n_x+z_x*n_y
+                + ((x.z * y.o) + (x.o * y.z)).o  # o=o_x*z_y+z_x*o_y
+                + (x.d * y.d).d  # d=d_x*d_y
+                + (x.m * y.m).m  # m=m_x*m_y
+                + (x.z * y.z).z  # z=z_x*z_y
+                + (x.s + y.s).s  # s=s_x+s_y
+                + (x.s + y.f).f  # f=f_y+s_x
+                + (y.u).u  # u=u_y
+                + (y.x).x  # x=x_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size
@@ -511,18 +511,17 @@ class MiniScript:
             x = self.children[0].compute_type()
             y = self.children[1].compute_type()
             self.type = ExpressionType(
-                'ux' + ('', 'B')['W' in y and 'B' in x]  # B=B_x*W_y
+                # <x> <y> BOOLAND
+                'ux' + (y.W * x.B).B  # B=B_x*W_y
+                + (x.n + (x.z * y.n)).n  # n=n_x+z_x*n_y
+                + ((x.z * y.o) + (x.o * y.z)).o  # o=o_x*z_y+z_x*o_y
+                + (x.d * y.d).d  # d=d_x*d_y
+                + (x.m * y.m).m  # m=m_x*m_y
+                + (x.z * y.z).z  # z=z_x*z_y
+                + (x.s + y.s).s  # s=s_x+s_y
+                + (x.es * y.es).e  # e=e_x*e_y*s_x*s_y
                 +
-                ('', 'n')['n' in x or ('z' in x and 'n' in y)]  # n=n_x+z_x*n_y
-                + ('', 'o')[('z' in x and 'o' in y) or
-                            ('o' in x and 'z' in y)]  # o=o_x*z_y+z_x*o_y
-                + ('', 'd')['d' in x and 'd' in y]  # d=d_x*d_y
-                + ('', 'm')['m' in x and 'm' in y]  # m=m_x*m_y
-                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
-                + ('', 's')['s' in x or 's' in y]  # s=s_x+s_y
-                + ('', 'e')['es' in x and 'es' in y]  # e=e_x*e_y*s_x*s_y
-                + ('', 'f')[('f' in x and 'f' in y) or 'fs' in x
-                            or 'fs' in y]  # f=f_x*f_y + f_x*s_x + f_y*s_y
+                ((x.f * y.f) + x.fs + y.fs).f  # f=f_x*f_y + f_x*s_x + f_y*s_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 1
@@ -530,15 +529,15 @@ class MiniScript:
             x = self.children[0].compute_type()
             y = self.children[1].compute_type()
             self.type = ExpressionType(
-                'x' + ('', 'B')['Bdu' in x and 'B' in y]  # B=B_x*d_x*u_x*B_y
-                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
-                + ('', 'o')['o' in x and 'z' in y]  # o=o_x*z_y
-                + ('', 'u')['u' in y]  # u=u_y
-                + ('', 'd')['d' in x]  # d=d_x
-                + ('', 's')['s' in x or 's' in y]  # s=s_x+s_y
-                + ('',
-                   'e')['e' in x and ('s' in x or 's' in y)]  # e=e_x*(s_x+s_y)
-                + ('', 'm')['em' in x and 'm' in y]  # m=m_x*m_y*e_x
+                # <x> NOTIF 0 ELSE <y> ENDIF
+                'x' + (x.Bdu * y.B).B  # B=B_x*d_x*u_x*B_y
+                + (x.z * y.z).z  # z=z_x*z_y
+                + (x.o * y.z).o  # o=o_x*z_y
+                + (y.u).u  # u=u_y
+                + (x.d).d  # d=d_x
+                + (x.s + y.s).s  # s=s_x+s_y
+                + (x.e * (x.s + y.s)).e  # e=e_x*(s_x+s_y)
+                + (x.em * y.m).m  # m=m_x*m_y*e_x
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 4
@@ -546,14 +545,13 @@ class MiniScript:
             x = self.children[0].compute_type()
             y = self.children[1].compute_type()
             self.type = ExpressionType(
-                'dux' + ('', 'B')['Bd' in x and 'Wd' in y]  # B=B_x*d_x*W_x*d_y
-                + ('', 'o')[('z' in x and 'o' in y) or
-                            ('o' in x and 'z' in y)]  # o=o_x*z_y+z_x*o_y
-                + ('', 'm')['em' in x and 'em' in y and (
-                    's' in x or 's' in y)]  # m=m_x*m_y*e_x*e_y*(s_x+s_y)
-                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
-                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
-                + ('', 'e')['e' in x and 'e' in y]  # e=e_x*e_y
+                # <x> <y> BOOLOR
+                'dux' + (x.Bd * y.Wd).B  # B=B_x*d_x*W_x*d_y
+                + ((x.z * y.o) + (x.o * y.z)).o  # o=o_x*z_y+z_x*o_y
+                + (x.em * y.em * (x.s + y.s)).m  # m=m_x*m_y*e_x*e_y*(s_x+s_y)
+                + (x.z * y.z).z  # z=z_x*z_y
+                + (x.s * y.s).s  # s=s_x*s_y
+                + (x.e * y.e).e  # e=e_x*e_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 1
@@ -561,12 +559,12 @@ class MiniScript:
             x = self.children[0].compute_type()
             y = self.children[1].compute_type()
             self.type = ExpressionType(
-                'fx' + ('', 'V')['Bud' in x and 'V' in y]  # V=V_y*B_x*u_x*d_x
-                + ('', 'o')['o' in x and 'z' in y]  # o=o_x*z_y
-                + ('', 'm')['me' in x and 'm' in y and
-                            ('s' in x or 's' in y)]  # m=m_x*m_y*e_x*(s_x+s_y)
-                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
-                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
+                # <x> NOTIF <y> ENDIF
+                'fx' + (x.Bud * y.V).V  # V=V_y*B_x*u_x*d_x
+                + (x.o * y.z).o  # o=o_x*z_y
+                + (x.me * y.m * (x.s + y.s)).m  # m=m_x*m_y*e_x*(s_x+s_y)
+                + (x.z * y.z).z  # z=z_x*z_y
+                + (x.s * y.s).s  # s=s_x*s_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 2
@@ -574,16 +572,16 @@ class MiniScript:
             x = self.children[0].compute_type()
             y = self.children[1].compute_type()
             self.type = ExpressionType(
-                'x' + ('', 'B')['Bdu' in x and 'B' in y]  # B=B_y*B_x*d_x*u_x
-                + ('', 'o')['o' in x and 'z' in y]  # o=o_x*z_y
-                + ('', 'm')['me' in x and 'm' in y and
-                            ('s' in x or 's' in y)]  # m=m_x*m_y*e_x*(s_x+s_y)
-                + ('', 'z')['z' in x and 'z' in y]  # z=z_x*z_y
-                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
-                + ('', 'e')['e' in x and 'e' in y]  # e=e_x*e_y
-                + ('', 'u')['u' in y]  # u=u_y
-                + ('', 'd')['d' in y]  # d=d_y
-                + ('', 'f')['f' in y]  # f=f_y
+                # <x> IFDUP NOTiF <y> ENDIF
+                'x' + (x.Bdu * y.B).B  # B=B_y*B_x*d_x*u_x
+                + (x.o * y.z).o  # o=o_x*z_y
+                + (x.me * y.m * (x.s + y.s)).m  # m=m_x*m_y*e_x*(s_x+s_y)
+                + (x.z * y.z).z  # z=z_x*z_y
+                + (x.s * y.s).s  # s=s_x*s_y
+                + (x.e * y.e).e  # e=e_x*e_y
+                + (y.u).u  # u=u_y
+                + (y.d).d  # d=d_y
+                + (y.f).f  # f=f_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 3
@@ -591,18 +589,17 @@ class MiniScript:
             x = self.children[0].compute_type()
             y = self.children[1].compute_type()
             self.type = ExpressionType(
-                'x' + ('', 'V')['V' in x and 'V' in y]  # V=V_x*V_y
-                + ('', 'B')['B' in x and 'B' in y]  # B=B_x*B_y
-                + ('', 'K')['K' in x and 'K' in y]  # K=K_x*K_y
-                + ('', 'u')['u' in x and 'u' in y]  # u=u_x*u_y
-                + ('', 'f')['f' in x and 'f' in y]  # f=f_x*f_y
-                + ('', 's')['s' in x and 's' in y]  # s=s_x*s_y
-                + ('', 'o')['z' in x and 'z' in y]  # o=z_x*z_y
-                + ('', 'e')[('e' in x and 'f' in y) or
-                            ('f' in x and 'e' in y)]  # e=e_x*f_y+f_x*e_y
-                + ('', 'm')['m' in x and 'm' in y and
-                            ('s' in x or 's' in y)]  # m=m_x*m_y*(s_x+s_y)
-                + ('', 'd')['d' in x or 'd' in y]  # d=d_x+d_y
+                # IF <x> ELSE <y> ENDIF
+                'x' + (x.V * y.V).V  # V=V_x*V_y
+                + (x.B * y.B).B  # B=B_x*B_y
+                + (x.K * y.K).K  # K=K_x*K_y
+                + (x.u * y.u).u  # u=u_x*u_y
+                + (x.f * y.f).f  # f=f_x*f_y
+                + (x.s * y.s).s  # s=s_x*s_y
+                + (x.z * y.z).o  # o=z_x*z_y
+                + ((x.e * y.f) + (x.f * y.e)).e  # e=e_x*f_y+f_x*e_y
+                + (x.m * y.m * (x.s + y.s)).m  # m=m_x*m_y*(s_x+s_y)
+                + (x.d + y.d).d  # d=d_x+d_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 3
@@ -611,28 +608,20 @@ class MiniScript:
             y = self.children[1].compute_type()
             z = self.children[2].compute_type()
             self.type = ExpressionType(
-                'x' + ('', 'B')['Bdu' in x and 'B' in y
-                                and 'B' in z]  # B=B_x*d_x*u_x*B_y*B_z
-                + ('', 'K')['Bdu' in x and 'K' in y
-                            and 'K' in z]  # K=B_x*d_x*u_x*K_y*K_z
-                + ('', 'V')['Bdu' in x and 'V' in y
-                            and 'V' in z]  # V=B_x*d_x*u_x*V_y*V_z
-                +
-                ('', 'z')['z' in x and 'z' in y and 'z' in z]  # z=z_x*z_y*z_z
-                + ('', 'o')[('z' in x and 'o' in y and 'o' in z) or
-                            ('o' in x and 'z' in y and 'z' in z
-                             )]  # o=o_x*z_y*z_z+z_x*o_y*o_z
-                + ('', 'u')['u' in y and 'u' in z]  # u=u_y*u_z
-                + ('',
-                   'f')[('s' in x or 'f' in y) and 'f' in z]  # f=(s_x+f_y)*f_z
-                + ('', 'd')['d' in z]  # d=d_z
-                + ('', 'e')[('s' in x or 'f' in y) and 'e' in x
-                            and 'e' in z]  # e=e_x*e_z*(s_x+s_y)
-                + ('', 'm')['em' in x and 'm' in y and 'm' in z and
-                            ('s' in x or 's' in y or 's' in z
-                             )]  # m=m_x*m_y*m_z*e_x*(s_x+s_y+s_z)
-                + ('',
-                   's')['s' in z and ('s' in x or 's' in y)]  # s=s_z*(s_x+s_y)
+                # <x> NOTIF <z> ELSE <y> ENDIF
+                'x' + (x.Bdu * y.B * z.B).B  # B=B_x*d_x*u_x*B_y*B_z
+                + (x.Bdu * y.K * z.K).K  # K=B_x*d_x*u_x*K_y*K_z
+                + (x.Bdu * y.V * z.V).V  # V=B_x*d_x*u_x*V_y*V_z
+                + (x.z * y.z * z.z).z  # z=z_x*z_y*z_z
+                + ((x.z * y.o * z.o) +
+                   (x.o * y.z * z.z)).o  # o=o_x*z_y*z_z+z_x*o_y*o_z
+                + (y.u * z.u).u  # u=u_y*u_z
+                + ((x.s + y.f) * z.f).f  # f=(s_x+f_y)*f_z
+                + (z.d).d  # d=d_z
+                + ((x.s + y.f) * x.e * z.e).e  # e=e_x*e_z*(s_x+s_y)
+                + (x.em * y.m * z.m *
+                   (x.s + y.s + z.s)).m  # m=m_x*m_y*m_z*e_x*(s_x+s_y+s_z)
+                + (z.s * (x.s + y.s)).s  # s=s_z*(s_x+s_y)
             )
             self.size = self.children[0].size + \
                 self.children[1].size + \
@@ -649,24 +638,22 @@ class MiniScript:
                     raise ValueError(
                         f'non-first expression in thresh should be Wdu {t} {child}'
                     )
-                if 'e' not in t:
-                    all_e = False
-                if 'm' not in t:
-                    all_m = False
-                if 's' in t:
+                all_e = all_e and t.e
+                all_m = all_m and t.m
+                if t.s:
                     num_s += 1
-                if 'o' in t:
+                if t.o:
                     args += 1
-                elif 'z' not in t:
+                elif not t.z:
                     args += 2
             self.type = ExpressionType(
-                'Bdu' + ('', 'z')[args == 0]  # all z's to get z
-                + ('', 'o')[args == 1]  # one o, all z's to get o
-                + ('', 'e')[all_e and num_s == len(self.children) -
-                            1]  # all s's and all e's
-                + ('', 'm')[all_e and all_m and num_s >= len(self.children) -
-                            1 - k]  # all e's and all e's
-                + ('', 's')[num_s >= len(self.children) - k])
+                'Bdu' + (args == 0).z  # all z's to get z
+                + (args == 1).o  # one o, all z's to get o
+                + (all_e and num_s == len(self.children) -
+                   1).e  # all s's and all e's
+                + (all_e and all_m and num_s >= len(self.children) - 1 - k
+                   ).m  # all e's and all e's
+                + (num_s >= len(self.children) - k).s)
             self.size = len(encode_minimal_num(int(self.children[0].word)))
             for child in self.children[1:]:
                 self.size += child.size + 1
@@ -676,172 +663,109 @@ class MiniScript:
         # take care of modifiers
         for m in reversed(self.modifiers):
             if m == 'a':
-                self.type = ExpressionType('x' +
-                                           ('', 'W')['B' in self.type]  # W=B_x
-                                           +
-                                           ('', 'u')['u' in self.type]  # u=u_x
-                                           +
-                                           ('', 'd')['d' in self.type]  # d=d_x
-                                           +
-                                           ('', 'f')['f' in self.type]  # f=f_x
-                                           +
-                                           ('', 'e')['e' in self.type]  # e=e_x
-                                           +
-                                           ('', 'm')['m' in self.type]  # m=m_x
-                                           +
-                                           ('', 's')['s' in self.type]  # s=s_x
-                                           )
+                self.type = ExpressionType(
+                    # TOALTSTACK <x> FROMALTSTACK
+                    'x' + self.type.B.W  # W=B_x
+                    + self.type.u.u  # u=u_x
+                    + self.type.d.d  # d=d_x
+                    + self.type.f.f  # f=f_x
+                    + self.type.e.e  # e=e_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
+                )
                 self.size += 2
             elif m == 's':
                 self.type = ExpressionType(
-                    ('', 'W')['Bo' in self.type]  # W=B_x*o_x
-                    + ('', 'u')['u' in self.type]  # u=u_x
-                    + ('', 'd')['d' in self.type]  # d=d_x
-                    + ('', 'f')['f' in self.type]  # f=f_x
-                    + ('', 'e')['e' in self.type]  # e=e_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + ('', 's')['s' in self.type]  # s=s_x
-                    + ('', 'x')['x' in self.type]  # x=x_x
+                    # SWAP <x>
+                    (self.type.Bo).W  # W=B_x*o_x
+                    + self.type.u.u  # u=u_x
+                    + self.type.d.d  # d=d_x
+                    + self.type.f.f  # f=f_x
+                    + self.type.e.e  # e=e_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
+                    + self.type.x.x  # x=x_x
                 )
                 self.size += 1
             elif m == 'c':
                 self.type = ExpressionType(
-                    # (a, b)[expr] will eval to a if false b if true
-                    'us' + ('', 'B')['K' in self.type]  # B=K_x
-                    + ('', 'o')['o' in self.type]  # o=o_x
-                    + ('', 'n')['n' in self.type]  # n=n_x
-                    + ('', 'd')['d' in self.type]  # d=d_x
-                    + ('', 'f')['f' in self.type]  # f=f_x
-                    + ('', 'e')['e' in self.type]  # e=e_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + 'us')
+                    # <x> CHECKSIG
+                    'us' + self.type.K.B  # B=K_x
+                    + self.type.o.o  # o=o_x
+                    + self.type.n.n  # n=n_x
+                    + self.type.d.d  # d=d_x
+                    + self.type.f.f  # f=f_x
+                    + self.type.e.e  # e=e_x
+                    + self.type.m.m  # m=m_x
+                )
                 self.size += 1
             elif m == 'd':
                 self.type = ExpressionType(
-                    'nudx' + ('', 'B')['Vz' in self.type]  # B=V_x*z_x
-                    + ('', 'o')['z' in self.type]  # o=z_x
-                    + ('', 'e')['f' in self.type]  # e=f_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + ('', 's')['s' in self.type]  # s=s_x
+                    # DUP IF <x> ENDIF
+                    'nudx' + (self.type.Vz).B  # B=V_x*z_x
+                    + self.type.z.o  # o=z_x
+                    + self.type.f.e  # e=f_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
                 )
                 self.size += 3
             elif m == 'v':
-                if 'x' in self.type:
+                if self.type.x:
                     self.size += 1
                 self.type = ExpressionType(
-                    # (a, b)[expr] will eval to a if false b if true
-                    'fx' + ('', 'V')['B' in self.type]  # V=B_x
-                    + ('', 'z')['z' in self.type]  # z=z_x
-                    + ('', 'o')['o' in self.type]  # o=o_x
-                    + ('', 'n')['n' in self.type]  # n=n_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + ('', 's')['s' in self.type]  # s=s_x
+                    # <x> VERIFY
+                    'fx' + self.type.B.V  # V=B_x
+                    + self.type.z.z  # z=z_x
+                    + self.type.o.o  # o=o_x
+                    + self.type.n.n  # n=n_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
                 )
             elif m == 'j':
                 self.type = ExpressionType(
-                    'ndx' + ('', 'B')['Bn' in self.type]  # B=B_x*n_x
-                    + ('', 'e')['f' in self.type]  # e=f_x
-                    + ('', 'o')['o' in self.type]  # o=o_x
-                    + ('', 'u')['u' in self.type]  # u=u_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + ('', 's')['s' in self.type]  # s=s_x
+                    # SIZE 0NOTEQUAL IF <x> ENDIF
+                    'ndx' + (self.type.Bn).B  # B=B_x*n_x
+                    + self.type.f.e  # e=f_x
+                    + self.type.o.o  # o=o_x
+                    + self.type.u.u  # u=u_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
                 )
                 self.size += 4
             elif m == 'n':
                 self.type = ExpressionType(
-                    'ux' + ('', 'B')['B' in self.type]  # B=B_x
-                    + ('', 'z')['z' in self.type]  # z=z_x
-                    + ('', 'o')['o' in self.type]  # o=o_x
-                    + ('', 'n')['n' in self.type]  # n=n_x
-                    + ('', 'd')['d' in self.type]  # d=d_x
-                    + ('', 'f')['f' in self.type]  # f=f_x
-                    + ('', 'e')['e' in self.type]  # e=e_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + ('', 's')['s' in self.type]  # s=s_x
+                    # <x> 0NOTEQUAL
+                    'ux' + self.type.B.B  # B=B_x
+                    + self.type.z.z  # z=z_x
+                    + self.type.o.o  # o=o_x
+                    + self.type.n.n  # n=n_x
+                    + self.type.d.d  # d=d_x
+                    + self.type.f.f  # f=f_x
+                    + self.type.e.e  # e=e_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
                 )
                 self.size += 1
             elif m in ('l', 'u'):
                 self.type = ExpressionType(
-                    # (a, b)[expr] will eval to a if false b if true
-                    'dx' + ('', 'B')['B' in self.type]  # B=B_x
-                    + ('', 'u')['u' in self.type]  # u=u_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + ('', 's')['s' in self.type]  # s=s_x
-                    + ('', 'o')['z' in self.type]  # o=z_x
-                    + ('', 'e')['f' in self.type]  # e=f_x
+                    # IF 0 ELSE <x> ENDIF/IF <x> ELSE 0 ENDIF
+                    'dx' + self.type.B.B  # B=B_x
+                    + self.type.u.u  # u=u_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
+                    + self.type.z.o  # o=z_x
+                    + self.type.f.e  # e=f_x
                 )
                 self.size += 4
             elif m == 't':
                 self.type = ExpressionType(
-                    # (a, b)[expr] will eval to a if false b if true
-                    'fux' + ('', 'B')['V' in self.type]  # B=V_x
-                    + ('', 'z')['z' in self.type]  # z=z_x
-                    + ('', 'o')['o' in self.type]  # o=o_x
-                    + ('', 'd')['d' in self.type]  # d=d_x
-                    + ('', 'm')['m' in self.type]  # m=m_x
-                    + ('', 's')['s' in self.type]  # s=s_x
+                    # <x> 1
+                    'fux' + self.type.V.B  # B=V_x
+                    + self.type.z.z  # z=z_x
+                    + self.type.o.o  # o=o_x
+                    + self.type.d.d  # d=d_x
+                    + self.type.m.m  # m=m_x
+                    + self.type.s.s  # s=s_x
                 )
                 self.size += 1
         return self.type
-
-
-EXPRESSION_TYPE_ALPHABET = 'BVKWzonduefsmx'
-
-
-class ExpressionType(int):
-    def __new__(cls, s):
-        result = 0
-        for letter in s:
-            if letter not in EXPRESSION_TYPE_ALPHABET:
-                raise KeyError('Not a valid type')
-            result |= (1 << EXPRESSION_TYPE_ALPHABET.index(letter))
-        e = super().__new__(cls, result)
-        if 'z' in e and 'o' in e:
-            raise TypeError('Cannot consume both 1 and 0 arguments')
-        if 'n' in e and 'z' in e:
-            raise TypeError(
-                'Cannot consume both 0 elements and 1 or more elements')
-        if 'V' in e and 'd' in e:
-            raise TypeError(
-                'Verifying expressions halt and are not dissatisfiable')
-        if 'K' in e and 'u' not in e:
-            raise TypeError('Key expressions are also unit expressions')
-        if 'V' in e and 'u' in e:
-            raise TypeError(
-                'Verifying expressions do not push anything back so are not unit expressions'
-            )
-        if 'e' in e and 'f' in e:
-            raise TypeError(
-                'Dissatisfactions cannot both be non-malleable and also have at least one signature'
-            )
-        if 'e' in e and 'd' not in e:
-            raise TypeError(
-                'Non-malleable Dissatisfactions imply dissatisfiability')
-        if 'V' in e and 'e' in e:
-            raise TypeError('Verifying expressions are not dissatisfiable')
-        if 'd' in e and 'f' in e:
-            raise TypeError('Dissatisfiability implies no signature is needed')
-        if 'V' in e and 'f' not in e:
-            raise TypeError(
-                'Verifying expressions have no dissatisfactions, meaning it is forced'
-            )
-        if 'K' in e and 's' not in e:
-            raise TypeError('Key expressions always require a signature')
-        if 'z' in e and 'm' not in e:
-            raise TypeError(
-                'Zero arguments being consumed imply non-malleability')
-        return e
-
-    def __repr__(self):
-        result = ''
-        for i, letter in enumerate(EXPRESSION_TYPE_ALPHABET):
-            if self & (1 << i):
-                result += letter
-        return result
-
-    def __contains__(self, letters):
-        result = True
-        for letter in letters:
-            index = EXPRESSION_TYPE_ALPHABET.index(letter)
-            result = result and bool(self & (1 << index))
-        return result
