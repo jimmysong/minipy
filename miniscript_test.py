@@ -185,7 +185,6 @@ class MiniScriptTest(TestCase):
             ),
         )
         for miniscript, script_hex, e_types, num_bytes in tests:
-            print(miniscript)
             k = MiniScript.parse(StringIO(miniscript))
             self.assertEqual(k.__repr__(), miniscript)
             s = k.script()

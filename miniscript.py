@@ -1,7 +1,7 @@
 from io import StringIO
 from unittest import TestCase, skip
 
-from expression import ExpressionType
+from expression import BetterBool, ExpressionType
 from op import *
 from script import Script
 
@@ -301,28 +301,32 @@ class MiniScript:
 
     def script(self):
         if self.word == 'pk':
-            script = Script(
-                [bytes.fromhex(self.children[0].word), OP_CHECKSIG])
+            sec = bytes.fromhex(self.children[0].word)
+            script = Script([sec, OP_CHECKSIG])
         elif self.word == 'pk_k':
-            script = Script([bytes.fromhex(self.children[0].word)])
+            # sometimes the checksig can sit outside an IF
+            # to save a byte, which motivates this script
+            # IF <x> ELSE <y> ENDIF CHECKSIG
+            sec = bytes.fromhex(self.children[0].word)
+            script = Script([sec])
         elif self.word == 'pkh':
             h160 = bytes.fromhex(self.children[0].word)
             script = Script(
                 [OP_DUP, OP_HASH160, h160, OP_EQUALVERIFY, OP_CHECKSIG])
         elif self.word == 'pk_h':
+            # sometimes the checksig can sit outside an IF
+            # to save a byte, which motivates this script
+            # IF <x> ELSE <y> ENDIF CHECKSIG
             h160 = bytes.fromhex(self.children[0].word)
             script = Script([OP_DUP, OP_HASH160, h160, OP_EQUALVERIFY])
         elif self.word == 'older':
-            script = Script([
-                encode_minimal_num(int(self.children[0].word)),
-                OP_CHECKSEQUENCEVERIFY
-            ])
+            amount = encode_minimal_num(int(self.children[0].word))
+            script = Script([amount, OP_CHECKSEQUENCEVERIFY])
         elif self.word == 'after':
-            script = Script([
-                encode_minimal_num(int(self.children[0].word)),
-                OP_CHECKLOCKTIMEVERIFY
-            ])
+            amount = encode_minimal_num(int(self.children[0].word))
+            script = Script([amount, OP_CHECKLOCKTIMEVERIFY])
         elif self.word in ('sha256', 'ripemd160', 'hash256', 'hash160'):
+            # hashlocks
             if self.word == 'sha256':
                 op = OP_SHA256
             elif self.word == 'ripemd160':
@@ -331,68 +335,93 @@ class MiniScript:
                 op = OP_HASH256
             else:
                 op = OP_HASH160
-            script = Script([
-                OP_SIZE,
-                encode_num(32), OP_EQUALVERIFY, op,
-                bytes.fromhex(self.children[0].word), OP_EQUAL
-            ])
+            h = bytes.fromhex(self.children[0].word)
+            script = Script(
+                [OP_SIZE,
+                 encode_num(32), OP_EQUALVERIFY, op, h, OP_EQUAL])
         elif self.word == 'just_1':
             script = Script([OP_1])
         elif self.word == 'just_0':
             script = Script([OP_0])
         elif self.word == 'and_v':
-            script = self.children[0].script() + self.children[1].script()
+            # "and" with a V expression and B, V or K
+            # outputs whatever the second one is
+            x = self.children[0].script()
+            y = self.children[1].script()
+            script = x + y
         elif self.word == 'and_b':
-            script = self.children[0].script() + self.children[1].script(
-            ) + Script([OP_BOOLAND])
+            # "and" with a B expression and a W expression
+            # outputs a B
+            x = self.children[0].script()
+            y = self.children[1].script()
+            script = x + y + [OP_BOOLAND]
         elif self.word == 'and_n':
-            script = self.children[0].script() + Script([
-                OP_NOTIF, OP_0, OP_ELSE
-            ]) + self.children[1].script() + Script([OP_ENDIF])
+            # "and" with two B expressions, the first being du
+            # outputs a B
+            x = self.children[0].script()
+            y = self.children[1].script()
+            script = x + [OP_NOTIF, OP_0, OP_ELSE] + y + [OP_ENDIF]
         elif self.word == 'or_b':
-            script = self.children[0].script() + self.children[1].script(
-            ) + Script([OP_BOOLOR])
-        elif self.word == 'or_d':
-            script = self.children[0].script() + Script([
-                OP_IFDUP, OP_NOTIF
-            ]) + self.children[1].script() + Script([OP_ENDIF])
+            # "or" with a B expression and a W expression, both being d
+            # outputs a B
+            x = self.children[0].script()
+            y = self.children[1].script()
+            script = x + y + [OP_BOOLOR]
         elif self.word == 'or_c':
-            script = self.children[0].script() + Script(
-                [OP_NOTIF]) + self.children[1].script() + Script([OP_ENDIF])
+            # "or" with a B expression and a V expression, first being du
+            # outputs a V
+            x = self.children[0].script()
+            y = self.children[1].script()
+            script = x + [OP_NOTIF] + y + [OP_ENDIF]
+        elif self.word == 'or_d':
+            # "or" with two B expressions, first being du
+            # outputs a B
+            x = self.children[0].script()
+            y = self.children[1].script()
+            script = x + [OP_IFDUP, OP_NOTIF] + y + [OP_ENDIF]
         elif self.word == 'or_i':
-            script = Script([OP_IF]) + self.children[0].script() + Script(
-                [OP_ELSE]) + self.children[1].script() + Script([OP_ENDIF])
+            # "or" with two B, V or K expressions
+            # outputs whatever the two expressions are
+            x = self.children[0].script()
+            y = self.children[1].script()
+            script = [OP_IF] + x + [OP_ELSE] + y + [OP_ENDIF]
         elif self.word == 'andor':
-            script = self.children[0].script() + Script(
-                [OP_NOTIF]) + self.children[2].script() + Script(
-                    [OP_ELSE]) + self.children[1].script() + Script([OP_ENDIF])
+            #
+            x = self.children[0].script()
+            y = self.children[1].script()
+            z = self.children[2].script()
+            script = x + [OP_NOTIF] + z + [OP_ELSE] + y + [OP_ENDIF]
         elif self.word == 'multi':
+            # for multisig
             keys = [bytes.fromhex(c.word) for c in self.children[1:]]
-            script = Script([
-                encode_minimal_num(int(self.children[0].word)), *keys,
-                encode_minimal_num(len(keys)), OP_CHECKMULTISIG
-            ])
+            k = encode_minimal_num(int(self.children[0].word))
+            n = encode_minimal_num(len(keys))
+            script = Script([k, *keys, n, OP_CHECKMULTISIG])
         elif self.word == 'thresh':
-            result = self.children[1].script()
+            # useful meta condition, first has to be Bdu, rest Wdu
+            script = self.children[1].script()
             for sub in self.children[2:]:
-                result += sub.script() + Script([OP_ADD])
-            script = result + Script(
-                [encode_minimal_num(int(self.children[0].word)), OP_EQUAL])
+                script += sub.script() + [OP_ADD]
+            k = encode_minimal_num(int(self.children[0].word))
+            script += [k, OP_EQUAL]
         else:
             raise SyntaxError(f'unknown word: {self.word}')
         if self.modifiers:
             for c in reversed(self.modifiers):
                 if c == 'a':
-                    script = Script([OP_TOALTSTACK]) + script + Script(
-                        [OP_FROMALTSTACK])
+                    # Turn B into W
+                    script = [OP_TOALTSTACK] + script + [OP_FROMALTSTACK]
                 elif c == 's':
-                    script = Script([OP_SWAP]) + script
+                    # Turn Bo into W
+                    script = [OP_SWAP] + script
                 elif c == 'c':
-                    script += Script([OP_CHECKSIG])
+                    # Turn K into B
+                    script += [OP_CHECKSIG]
                 elif c == 'd':
-                    script = Script([OP_DUP, OP_IF]) + script + Script(
-                        [OP_ENDIF])
+                    # Turn Vz into B
+                    script = [OP_DUP, OP_IF] + script + [OP_ENDIF]
                 elif c == 'v':
+                    # Turn B into V
                     if script[-1] == OP_EQUAL:
                         script[-1] = OP_EQUALVERIFY
                     elif script[-1] == OP_CHECKSIG:
@@ -400,20 +429,23 @@ class MiniScript:
                     elif script[-1] == OP_CHECKMULTISIG:
                         script[-1] = OP_CHECKMULTISIGVERIFY
                     else:
-                        script += Script([OP_VERIFY])
+                        script += [OP_VERIFY]
                 elif c == 'j':
-                    script = Script([OP_SIZE, OP_0NOTEQUAL, OP_IF
-                                     ]) + script + Script([OP_ENDIF])
+                    # bypass if the top stack element is 0
+                    script = [OP_SIZE, OP_0NOTEQUAL, OP_IF] \
+                        + script + [OP_ENDIF]
                 elif c == 'n':
-                    script += Script([OP_0NOTEQUAL])
+                    # turn B into a Bu (for feeding into IF)
+                    script += [OP_0NOTEQUAL]
                 elif c == 't':
-                    script += Script([OP_1])
+                    # turn V into B
+                    script += [OP_1]
                 elif c == 'u':
-                    script = Script([OP_IF]) + script + Script(
-                        [OP_ELSE, OP_0, OP_ENDIF])
+                    # turn z into o (consume one)
+                    script = [OP_IF] + script + [OP_ELSE, OP_0, OP_ENDIF]
                 elif c == 'l':
-                    script = Script([OP_IF, OP_0, OP_ELSE]) + script + Script(
-                        [OP_ENDIF])
+                    # turn z into o (consume one)
+                    script = [OP_IF, OP_0, OP_ELSE] + script + [OP_ENDIF]
         return script
 
     def validate(self):
@@ -495,15 +527,15 @@ class MiniScript:
                 (x.V * y.B).B  # B=V_x*B_y
                 + (x.V * y.V).V  # V=V_x*V_y
                 + (x.V * y.K).K  # K=V_x*K_y
-                + (x.n + (x.z * y.n)).n  # n=n_x+z_x*n_y
-                + ((x.z * y.o) + (x.o * y.z)).o  # o=o_x*z_y+z_x*o_y
+                + (x.n + x.z * y.n).n  # n=n_x+z_x*n_y
+                + (x.z * y.o + x.o * y.z).o  # o=o_x*z_y+z_x*o_y
                 + (x.d * y.d).d  # d=d_x*d_y
                 + (x.m * y.m).m  # m=m_x*m_y
                 + (x.z * y.z).z  # z=z_x*z_y
                 + (x.s + y.s).s  # s=s_x+s_y
                 + (x.s + y.f).f  # f=f_y+s_x
-                + (y.u).u  # u=u_y
-                + (y.x).x  # x=x_y
+                + y.u.u  # u=u_y
+                + y.x.x  # x=x_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size
@@ -513,15 +545,14 @@ class MiniScript:
             self.type = ExpressionType(
                 # <x> <y> BOOLAND
                 'ux' + (y.W * x.B).B  # B=B_x*W_y
-                + (x.n + (x.z * y.n)).n  # n=n_x+z_x*n_y
-                + ((x.z * y.o) + (x.o * y.z)).o  # o=o_x*z_y+z_x*o_y
+                + (x.n + x.z * y.n).n  # n=n_x+z_x*n_y
+                + (x.z * y.o + x.o * y.z).o  # o=o_x*z_y+z_x*o_y
                 + (x.d * y.d).d  # d=d_x*d_y
                 + (x.m * y.m).m  # m=m_x*m_y
                 + (x.z * y.z).z  # z=z_x*z_y
                 + (x.s + y.s).s  # s=s_x+s_y
                 + (x.es * y.es).e  # e=e_x*e_y*s_x*s_y
-                +
-                ((x.f * y.f) + x.fs + y.fs).f  # f=f_x*f_y + f_x*s_x + f_y*s_y
+                + (x.f * y.f + x.fs + y.fs).f  # f=f_x*f_y + f_x*s_x + f_y*s_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 1
@@ -533,8 +564,8 @@ class MiniScript:
                 'x' + (x.Bdu * y.B).B  # B=B_x*d_x*u_x*B_y
                 + (x.z * y.z).z  # z=z_x*z_y
                 + (x.o * y.z).o  # o=o_x*z_y
-                + (y.u).u  # u=u_y
-                + (x.d).d  # d=d_x
+                + y.u.u  # u=u_y
+                + x.d.d  # d=d_x
                 + (x.s + y.s).s  # s=s_x+s_y
                 + (x.e * (x.s + y.s)).e  # e=e_x*(s_x+s_y)
                 + (x.em * y.m).m  # m=m_x*m_y*e_x
@@ -547,7 +578,7 @@ class MiniScript:
             self.type = ExpressionType(
                 # <x> <y> BOOLOR
                 'dux' + (x.Bd * y.Wd).B  # B=B_x*d_x*W_x*d_y
-                + ((x.z * y.o) + (x.o * y.z)).o  # o=o_x*z_y+z_x*o_y
+                + (x.z * y.o + x.o * y.z).o  # o=o_x*z_y+z_x*o_y
                 + (x.em * y.em * (x.s + y.s)).m  # m=m_x*m_y*e_x*e_y*(s_x+s_y)
                 + (x.z * y.z).z  # z=z_x*z_y
                 + (x.s * y.s).s  # s=s_x*s_y
@@ -579,9 +610,9 @@ class MiniScript:
                 + (x.z * y.z).z  # z=z_x*z_y
                 + (x.s * y.s).s  # s=s_x*s_y
                 + (x.e * y.e).e  # e=e_x*e_y
-                + (y.u).u  # u=u_y
-                + (y.d).d  # d=d_y
-                + (y.f).f  # f=f_y
+                + y.u.u  # u=u_y
+                + y.d.d  # d=d_y
+                + y.f.f  # f=f_y
             )
             self.size = self.children[0].size + \
                 self.children[1].size + 3
@@ -597,7 +628,7 @@ class MiniScript:
                 + (x.f * y.f).f  # f=f_x*f_y
                 + (x.s * y.s).s  # s=s_x*s_y
                 + (x.z * y.z).o  # o=z_x*z_y
-                + ((x.e * y.f) + (x.f * y.e)).e  # e=e_x*f_y+f_x*e_y
+                + (x.e * y.f + x.f * y.e).e  # e=e_x*f_y+f_x*e_y
                 + (x.m * y.m * (x.s + y.s)).m  # m=m_x*m_y*(s_x+s_y)
                 + (x.d + y.d).d  # d=d_x+d_y
             )
@@ -613,11 +644,11 @@ class MiniScript:
                 + (x.Bdu * y.K * z.K).K  # K=B_x*d_x*u_x*K_y*K_z
                 + (x.Bdu * y.V * z.V).V  # V=B_x*d_x*u_x*V_y*V_z
                 + (x.z * y.z * z.z).z  # z=z_x*z_y*z_z
-                + ((x.z * y.o * z.o) +
-                   (x.o * y.z * z.z)).o  # o=o_x*z_y*z_z+z_x*o_y*o_z
+                + (x.z * y.o * z.o +
+                   x.o * y.z * z.z).o  # o=o_x*z_y*z_z+z_x*o_y*o_z
                 + (y.u * z.u).u  # u=u_y*u_z
                 + ((x.s + y.f) * z.f).f  # f=(s_x+f_y)*f_z
-                + (z.d).d  # d=d_z
+                + z.d.d  # d=d_z
                 + ((x.s + y.f) * x.e * z.e).e  # e=e_x*e_z*(s_x+s_y)
                 + (x.em * y.m * z.m *
                    (x.s + y.s + z.s)).m  # m=m_x*m_y*m_z*e_x*(s_x+s_y+s_z)
@@ -627,19 +658,20 @@ class MiniScript:
                 self.children[1].size + \
                 self.children[2].size + 3
         elif self.word == 'thresh':
-            all_e, all_m, num_s, args = True, True, 0, 0
+            all_e, all_m = BetterBool(True), BetterBool(True)
+            num_s, args = 0, 0
             k = int(self.children[0].word)
             for i, child in enumerate(self.children[1:]):
                 t = child.compute_type()
-                if i == 0 and 'Bdu' not in t:
+                if i == 0 and not t.Bdu:
                     raise ValueError(
                         'First expression in thresh should be Bdu')
-                elif i > 0 and 'Wdu' not in t:
+                elif i > 0 and not t.Wdu:
                     raise ValueError(
                         f'non-first expression in thresh should be Wdu {t} {child}'
                     )
-                all_e = all_e and t.e
-                all_m = all_m and t.m
+                all_e *= t.e
+                all_m *= t.m
                 if t.s:
                     num_s += 1
                 if t.o:
@@ -647,13 +679,17 @@ class MiniScript:
                 elif not t.z:
                     args += 2
             self.type = ExpressionType(
-                'Bdu' + (args == 0).z  # all z's to get z
-                + (args == 1).o  # one o, all z's to get o
-                + (all_e and num_s == len(self.children) -
-                   1).e  # all s's and all e's
-                + (all_e and all_m and num_s >= len(self.children) - 1 - k
-                   ).m  # all e's and all e's
-                + (num_s >= len(self.children) - k).s)
+                'Bdu'
+                # all z's to get z
+                + BetterBool(args == 0).z
+                # one o, all z's to get o
+                + BetterBool(args == 1).o
+                # all s's and all e's
+                + (all_e * (num_s == len(self.children) - 1)).e
+                # all e's and all m's and some s's
+                + (all_e * all_m * (num_s >= len(self.children) - 1 - k)).m
+                # some s's
+                + BetterBool(num_s >= len(self.children) - k).s)
             self.size = len(encode_minimal_num(int(self.children[0].word)))
             for child in self.children[1:]:
                 self.size += child.size + 1

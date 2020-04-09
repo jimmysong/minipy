@@ -47,7 +47,11 @@ from witness import Witness
 
 class Script(list):
     def __add__(self, other: Script) -> Script:
-        return Script(super().__add__(other))
+        return self.__class__(super().__add__(other))
+
+    def __radd__(self, other: Script) -> Script:
+        o = self.__class__(other)
+        return o + self
 
     def __new__(cls,
                 commands: Optional[List[Union(bytes, str)]] = None) -> Script:
@@ -64,7 +68,7 @@ class Script(list):
         result = ''
         for current in self:
             if OP_CODE_NAMES.get(current):
-                result += f'{OP_CODE_NAMES.get(current)} '
+                result += f'{OP_CODE_NAMES[current]} '
             elif type(current) == str:
                 result += f'<{current}> '
             else:

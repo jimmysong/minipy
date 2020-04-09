@@ -1,3 +1,17 @@
+# B Base: pushes non-zero to stack when satsified, zero to stack when not
+# V Verify: leaves nothing new on stack when satisfied, exits otherwise
+# K Key: pushes a pubkey to the stack, needs sig to satisfy
+# W Wrapped: inputs come from below the top element acts like B
+# z Zero: consumes 0 elements from the stack
+# o One: consumes 1 element from the stack
+# n Nonzero: top element on stack does not need to be zero
+# d Dissatisfiable: can run without satisfying or exiting script
+# u Unit: puts exactly a 1 on the stack when satisfied
+# e Expression: dissatisfiable and nonmalleable
+# f Forced: dissatisfying requires a signature
+# s Safe: satisfying requires a signature
+# m Nonmalleable: satisfying can be done so it's nonmalleable
+# x Expensive: requires 1 more byte to make into V expression
 EXPRESSION_TYPE_ALPHABET = 'BVKWzonduefsmx'
 
 
@@ -8,7 +22,11 @@ class BetterBool:
         self.b = b
 
     def __add__(self, other):
-        return self.__class__(self.b or other.b)
+        if type(other) == bool:
+            o = self.__class__(other)
+        else:
+            o = other
+        return self.__class__(self.b or o.b)
 
     def __bool__(self):
         return self.b
@@ -20,7 +38,11 @@ class BetterBool:
             return ''
 
     def __mul__(self, other):
-        return self.__class__(self.b and other.b)
+        if type(other) == bool:
+            o = self.__class__(other)
+        else:
+            o = other
+        return self.__class__(self.b and o.b)
 
 
 class ExpressionType(set):
